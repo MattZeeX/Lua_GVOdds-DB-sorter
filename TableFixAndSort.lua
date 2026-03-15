@@ -24,6 +24,9 @@ local lfs = require("lfs")
 local scriptFileName = "TableFixAndSort.lua"
 local defaultTargetTable = "GreatVaultOddsDB"
 local targetTableName = (arg and arg[1]) or defaultTargetTable
+local prioritizedTableKeyOrder = {
+  sources = 1,
+}
 
 -- Directory paths (relative to CMD directory)
 local inputDir = "Input"
@@ -58,13 +61,13 @@ end
 
 -- === File Operations ===
 local function copyFile(src, dest)
-  local inFile = io.open(src, "rb")
-  if not inFile then error("Failed to open " .. src) end
+  local inFile, inErr = io.open(src, "rb")
+  if not inFile then error("Failed to open " .. src .. ": " .. tostring(inErr)) end
   local content = inFile:read("*a")
   inFile:close()
 
-  local outFile = io.open(dest, "wb")
-  if not outFile then error("Failed to open " .. dest .. " for writing") end
+  local outFile, outErr = io.open(dest, "wb")
+  if not outFile then error("Failed to open " .. dest .. " for writing: " .. tostring(outErr)) end
   outFile:write(content)
   outFile:close()
 end
@@ -84,8 +87,8 @@ end
 
 -- === Table Fixing and Serialization ===
 local function fixTableFile(filePath, tableName)
-  local input = io.open(filePath, "r")
-  if not input then error("Failed to open " .. filePath) end
+  local input, inputErr = io.open(filePath, "r")
+  if not input then error("Failed to open " .. filePath .. ": " .. tostring(inputErr)) end
 
   local lines = {}
   local foundTable = false
@@ -129,7 +132,10 @@ local function fixTableFile(filePath, tableName)
     table.insert(lines, "return " .. tableName)
   end
 
-  local output = io.open(filePath, "w")
+  local output, outputErr = io.open(filePath, "w")
+  if not output then
+    error("Failed to open " .. filePath .. " for writing: " .. tostring(outputErr))
+  end
   for _, line in ipairs(lines) do
     output:write(line, "\n")
   end
@@ -149,15 +155,47 @@ end
 
 local function serializeTable(tbl, indent)
   indent = indent or ""
-  local nextIndent = indent .. "  "
+  local nextIndent = indent .. "    "
   local keys = {}
 
   for k in pairs(tbl) do table.insert(keys, k) end
 
+  local function getKeyBucket(key)
+    local value = tbl[key]
+
+    if type(value) ~= "table" then
+      return 1
+    end
+
+    if type(key) == "string" then
+      local metadataPriority = prioritizedTableKeyOrder[key]
+      if metadataPriority then
+        return 2, metadataPriority
+      end
+    end
+
+    return 3
+  end
+
   table.sort(keys, function(a, b)
-    if type(a) == "number" and type(b) == "number" then return a < b
-    elseif type(a) == "string" and type(b) == "string" then return a < b
-    else return tostring(a) < tostring(b) end
+    local aBucket, aPriority = getKeyBucket(a)
+    local bBucket, bPriority = getKeyBucket(b)
+
+    if aBucket ~= bBucket then
+      return aBucket < bBucket
+    end
+
+    if aBucket == 2 and aPriority ~= bPriority then
+      return aPriority < bPriority
+    end
+
+    if type(a) == "number" and type(b) == "number" then
+      return a < b -- numeric comparison
+    elseif type(a) == "string" and type(b) == "string" then
+      return a < b -- alphabetical comparison
+    else
+      return tostring(a) < tostring(b)
+    end
   end)
 
   local parts = {"{\n"}
@@ -184,8 +222,8 @@ local function serializeTable(tbl, indent)
 end
 
 local function writeSortedTableToTxt(tbl, filePath)
-  local file = io.open(filePath, "w")
-  if not file then error("Failed to open " .. filePath .. " for writing") end
+  local file, err = io.open(filePath, "w")
+  if not file then error("Failed to open " .. filePath .. " for writing: " .. tostring(err)) end
   file:write(serializeTable(tbl))
   file:close()
 end
