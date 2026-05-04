@@ -1,4 +1,4 @@
-A helper utility to format loot data for my addon [Great Vault Odds](https://github.com/MattZeeX/GreatVaultOdds)
+A helper utility to format loot data for my addon Great Vault Odds: [Curseforge](https://www.curseforge.com/wow/addons/great-vault-odds) & [GitHub](https://github.com/MattZeeX/GreatVaultOdds)
 
 Requires [LFS](https://lunarmodules.github.io/luafilesystem/).
 
