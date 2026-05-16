@@ -1,127 +1,171 @@
--- TableFixAndSort.lua
-
---[[
-  This script processes Lua files containing a specific table (default: GreatVaultOddsDB).
-  It does the following for each .lua file found in the 'Input' folder:
-
-    1. Copies the original unaltered Lua file to 'Input/Archived Inputs',
-       unless the file is skipped or processing fails.
-       - If a file with the same name already exists, appends a numeric suffix (_1, _2, etc.).
-    2. Ensures the specified table is declared with 'local' and ends with 'return <table>'.
-       - These modifications are done on a temporary working file.
-    3. Loads the table, sorts its keys, and writes a .txt representation of the table
-       into the 'Sorted Tables' directory.
-       - Again, ensures no name collisions by adding a numeric suffix when needed.
-
-  Configuration:
-    - You can optionally pass a table name as a command line argument.
-    - By default, the table name is 'GreatVaultOddsDB'.
-]]
-
 local lfs = require("lfs")
 
--- === Configuration ===
-local scriptFileName = "TableFixAndSort.lua"
 local defaultTargetTable = "GreatVaultOddsDB"
-local targetTableName = (arg and arg[1]) or defaultTargetTable
-local prioritizedTableKeyOrder = {
-  sources = 1,
+
+local config = {
+  scriptFileName = "TableFixAndSort.lua",
+  targetTableName = (arg and arg[1]) or defaultTargetTable,
+
+  inputDir = "Input",
+  archivedInputDir = "Input/Archived Inputs",
+  sortedOutputDir = "Sorted Tables",
+
+  sortRules = {
+    scalarKeys = 1,
+    prioritisedTableKeys = 2,
+    otherTableKeys = 3,
+
+    prioritisedTableKeyOrder = {
+      sources = 1,
+    },
+  },
 }
 
--- Directory paths (relative to CMD directory)
-local inputDir = "Input"
-local archivedInputDir = inputDir .. "/Archived Inputs"
-local sortedOutputDir = "Sorted Tables"
-
--- Get the filename this script is running from
-local actualScriptPath = arg and arg[0] or scriptFileName
-local actualScriptName = actualScriptPath:match("[^/\\]+$") or scriptFileName
-
-local isExcludedFile = {
-    ["__working__.lua"] = true,
-    [scriptFileName] = true,
-    [actualScriptName] = true,
+local Sorter = {
+  config = config,
 }
 
--- === Utility Functions ===
-local function isLuaFile(filename)
-  return filename:match("%.lua$")
+local function joinPath(...)
+  return table.concat({...}, "/")
 end
 
--- === Directory Setup ===
+local function filenameFromPath(path)
+  return path:match("[^/\\]+$") or path
+end
+
+local function escapePattern(text)
+  return text:gsub("([%(%)%.%%%+%-%*%?%[%]%^%$])", "%%%1")
+end
+
+local function isLuaFile(filename)
+  return filename:match("%.lua$") ~= nil
+end
+
+local function readFile(path)
+  local file, err = io.open(path, "rb")
+  if not file then
+    error(("Failed to read %s: %s"):format(path, tostring(err)))
+  end
+
+  local content = file:read("*a")
+  file:close()
+  return content
+end
+
+local function writeFile(path, content)
+  local file, err = io.open(path, "wb")
+  if not file then
+    error(("Failed to write %s: %s"):format(path, tostring(err)))
+  end
+
+  file:write(content)
+  file:close()
+end
+
+local function copyFile(src, dest)
+  writeFile(dest, readFile(src))
+end
+
+local function removeFile(path)
+  local ok, err = os.remove(path)
+  if not ok then
+    print(("[WARN] Failed to remove %s: %s"):format(path, tostring(err)))
+  end
+  return ok
+end
+
 local function ensureDirectory(path)
   local attr = lfs.attributes(path)
   if not attr then
     local ok, err = lfs.mkdir(path)
-    if not ok then error("Failed to create directory '" .. path .. "': " .. tostring(err)) end
-  elseif attr.mode ~= "directory" then
-    error("'" .. path .. "' exists but is not a directory.")
+    if not ok then
+      error(("Failed to create directory %s: %s"):format(path, tostring(err)))
+    end
+    return
+  end
+
+  if attr.mode ~= "directory" then
+    error(path .. " exists but is not a directory")
   end
 end
 
--- === File Operations ===
-local function copyFile(src, dest)
-  local inFile, inErr = io.open(src, "rb")
-  if not inFile then error("Failed to open " .. src .. ": " .. tostring(inErr)) end
-  local content = inFile:read("*a")
-  inFile:close()
-
-  local outFile, outErr = io.open(dest, "wb")
-  if not outFile then error("Failed to open " .. dest .. " for writing: " .. tostring(outErr)) end
-  outFile:write(content)
-  outFile:close()
-end
-
--- Resolves a filename collision by appending _1, _2, etc.
-local function resolveFilenameCollision(basePath, filename)
+local function resolveFilenameCollision(dir, filename)
   local name, ext = filename:match("^(.-)(%..-)$")
-  if not name then name, ext = filename, "" end
-  local counter = 1
+  if not name then
+    name, ext = filename, ""
+  end
+
   local candidate = filename
-  while lfs.attributes(basePath .. "/" .. candidate) do
-    candidate = string.format("%s_%d%s", name, counter, ext)
+  local counter = 1
+
+  while lfs.attributes(joinPath(dir, candidate)) do
+    candidate = ("%s_%d%s"):format(name, counter, ext)
     counter = counter + 1
   end
+
   return candidate
 end
 
--- === Table Fixing and Serialization ===
-local function fixTableFile(filePath, tableName)
-  local input, inputErr = io.open(filePath, "r")
-  if not input then error("Failed to open " .. filePath .. ": " .. tostring(inputErr)) end
+local function archiveFile(src, destDir)
+  local filename = filenameFromPath(src)
+  local archivedName = resolveFilenameCollision(destDir, filename)
+  local archivedPath = joinPath(destDir, archivedName)
+
+  copyFile(src, archivedPath)
+  return archivedPath
+end
+
+local function logInfo(...)
+  print("[INFO]", ...)
+end
+
+local function logError(file, message)
+  print(("[ERROR] %s: %s"):format(file or "<unknown>", tostring(message)))
+end
+
+local function prepareSavedVariableSource(source, tableName)
+  source = source:gsub("\r\n", "\n"):gsub("\r", "\n")
+  if source:sub(-1) ~= "\n" then
+    source = source .. "\n"
+  end
+
+  local tablePattern = escapePattern(tableName)
+  local declarationPattern = "^%s*" .. tablePattern .. "%s*=%s*{"
+  local localDeclarationPattern = "^%s*local%s+" .. tablePattern .. "%s*=%s*{"
+  -- The frontier prevents `return GreatVaultOddsDBExtra` from matching this table.
+  -- http://lua-users.org/wiki/FrontierPattern
+  local returnPattern = "^%s*return%s+" .. tablePattern .. "%f[^_%w]"
 
   local lines = {}
   local foundTable = false
   local hasLocal = false
   local hasReturn = false
 
-  for line in input:lines() do
+  for line in source:gmatch("([^\n]*)\n") do
     if not foundTable then
-      local tn = line:match("^%s*local%s+" .. tableName .. "%s*=%s*{")
-      if tn then
+      if line:match(localDeclarationPattern) then
         foundTable = true
         hasLocal = true
-      elseif line:match("^%s*" .. tableName .. "%s*=%s*{") then
+      elseif line:match(declarationPattern) then
         foundTable = true
       end
     end
 
-    if line:match("^%s*return%s+" .. tableName) then
+    if line:match(returnPattern) then
       hasReturn = true
     end
 
     table.insert(lines, line)
   end
-  input:close()
 
   if not foundTable then
-    return false, "Target table '" .. tableName .. "' not found."
+    return nil, "target table not found"
   end
 
   if not hasLocal then
     for i, line in ipairs(lines) do
-      if line:match("^%s*" .. tableName .. "%s*=%s*{") then
-        lines[i] = line:gsub("^%s*(" .. tableName .. "%s*=%s*{)", "local %1")
+      if line:match(declarationPattern) then
+        lines[i] = line:gsub("^(%s*)(" .. tablePattern .. "%s*=%s*{)", "%1local %2", 1)
         break
       end
     end
@@ -132,236 +176,221 @@ local function fixTableFile(filePath, tableName)
     table.insert(lines, "return " .. tableName)
   end
 
-  local output, outputErr = io.open(filePath, "w")
-  if not output then
-    error("Failed to open " .. filePath .. " for writing: " .. tostring(outputErr))
-  end
-  for _, line in ipairs(lines) do
-    output:write(line, "\n")
-  end
-  output:close()
-
-  return true
+  return table.concat(lines, "\n")
 end
 
-local function loadTableFromFile(filePath)
-  local f, err = loadfile(filePath)
-  if not f then error("Failed to load " .. filePath .. ": " .. err) end
-  local success, tbl = pcall(f)
-  if not success then error("Execution failed: " .. tbl) end
-  if type(tbl) ~= "table" then error("Returned value is not a table") end
-  return tbl
+local function loadTableFromSource(source, chunkName)
+  local chunk, err = load(source, "@" .. chunkName)
+  if not chunk then
+    error(err)
+  end
+
+  local ok, result = pcall(chunk)
+  if not ok then
+    error(result)
+  end
+
+  if type(result) ~= "table" then
+    error("returned value is not a table")
+  end
+
+  return result
 end
 
-local function serializeTable(tbl, indent)
-  indent = indent or ""
-  local nextIndent = indent .. "    "
+local function keySortBucket(tbl, key, sortRules)
+  if type(tbl[key]) ~= "table" then
+    return sortRules.scalarKeys
+  end
+
+  if type(key) == "string" and sortRules.prioritisedTableKeyOrder[key] then
+    return sortRules.prioritisedTableKeys, sortRules.prioritisedTableKeyOrder[key]
+  end
+
+  return sortRules.otherTableKeys
+end
+
+local function compareKeys(tbl, sortRules, a, b)
+  local aBucket, aPriority = keySortBucket(tbl, a, sortRules)
+  local bBucket, bPriority = keySortBucket(tbl, b, sortRules)
+
+  if aBucket ~= bBucket then
+    return aBucket < bBucket
+  end
+
+  if aPriority and bPriority and aPriority ~= bPriority then
+    return aPriority < bPriority
+  end
+
+  if type(a) == "number" and type(b) == "number" then
+    return a < b
+  end
+
+  if type(a) == "string" and type(b) == "string" then
+    return a < b
+  end
+
+  return tostring(a) < tostring(b)
+end
+
+local function sortedKeys(tbl, sortRules)
   local keys = {}
-
-  for k in pairs(tbl) do table.insert(keys, k) end
-
-  local function getKeyBucket(key)
-    local value = tbl[key]
-
-    if type(value) ~= "table" then
-      return 1
-    end
-
-    if type(key) == "string" then
-      local metadataPriority = prioritizedTableKeyOrder[key]
-      if metadataPriority then
-        return 2, metadataPriority
-      end
-    end
-
-    return 3
+  for key in pairs(tbl) do
+    table.insert(keys, key)
   end
 
   table.sort(keys, function(a, b)
-    local aBucket, aPriority = getKeyBucket(a)
-    local bBucket, bPriority = getKeyBucket(b)
-
-    if aBucket ~= bBucket then
-      return aBucket < bBucket
-    end
-
-    if aBucket == 2 and aPriority ~= bPriority then
-      return aPriority < bPriority
-    end
-
-    if type(a) == "number" and type(b) == "number" then
-      return a < b -- numeric comparison
-    elseif type(a) == "string" and type(b) == "string" then
-      return a < b -- alphabetical comparison
-    else
-      return tostring(a) < tostring(b)
-    end
+    return compareKeys(tbl, sortRules, a, b)
   end)
 
+  return keys
+end
+
+local function formatKey(key)
+  if type(key) == "string" and key:match("^[_%a][_%w]*$") then
+    return key
+  end
+
+  if type(key) == "string" then
+    return "[" .. string.format("%q", key) .. "]"
+  end
+
+  return "[" .. tostring(key) .. "]"
+end
+
+local function serialiseValue(value, indent, sortRules)
+  if type(value) == "table" then
+    return Sorter.serialiseTable(value, indent, sortRules)
+  end
+
+  if type(value) == "string" then
+    return string.format("%q", value)
+  end
+
+  return tostring(value)
+end
+
+function Sorter.serialiseTable(tbl, indent, sortRules)
+  indent = indent or ""
+  sortRules = sortRules or config.sortRules
+
+  local nextIndent = indent .. "    "
   local parts = {"{\n"}
 
-  for _, k in ipairs(keys) do
-    local v = tbl[k]
-    local keyRepr = (type(k) == "string" and k:match("^[_%a][_%w]*$") and k) or
-                    ("[" .. (type(k) == "string" and string.format("%q", k) or tostring(k)) .. "]")
-
-    local valRepr
-    if type(v) == "table" then
-      valRepr = serializeTable(v, nextIndent)
-    elseif type(v) == "string" then
-      valRepr = string.format("%q", v)
-    else
-      valRepr = tostring(v)
-    end
-
-    table.insert(parts, nextIndent .. keyRepr .. " = " .. valRepr .. ",\n")
+  for _, key in ipairs(sortedKeys(tbl, sortRules)) do
+    local value = serialiseValue(tbl[key], nextIndent, sortRules)
+    table.insert(parts, nextIndent .. formatKey(key) .. " = " .. value .. ",\n")
   end
 
   table.insert(parts, indent .. "}")
   return table.concat(parts)
 end
 
-local function writeSortedTableToTxt(tbl, filePath)
-  local file, err = io.open(filePath, "w")
-  if not file then error("Failed to open " .. filePath .. " for writing: " .. tostring(err)) end
-  file:write(serializeTable(tbl))
-  file:close()
+local function outputPathFor(filename)
+  local baseOutputName = filename:gsub("%.lua$", ".txt")
+  local outputName = resolveFilenameCollision(config.sortedOutputDir, baseOutputName)
+  return joinPath(config.sortedOutputDir, outputName)
 end
 
--- === Logging Helpers ===
+local function processFile(filename)
+  local inputPath = joinPath(config.inputDir, filename)
+  local source = readFile(inputPath)
+  local loadableSource, prepareErr = prepareSavedVariableSource(source, config.targetTableName)
 
-local function logInfo(...)
-  print("[INFO]", ...)
-end
+  if not loadableSource then
+    return {
+      status = "skipped",
+      file = filename,
+      inputPath = inputPath,
+      reason = prepareErr,
+    }
+  end
 
-local function logWarn(...)
-  print("[WARN]", ...)
-end
-
-local function logError(file, err)
-  print(string.format("[ERROR] %s: %s", file or "<unknown>", err))
-end
-
--- === File Helpers ===
-
-local function archiveFile(src, destDir)
-  local filename = src:match("[^/\\]+$")
-  local resolvedName = resolveFilenameCollision(destDir, filename)
-  local destPath = destDir .. "/" .. resolvedName
-  local ok, err = pcall(copyFile, src, destPath)
-  return ok, err, destPath
-end
-
-local function removeFile(path)
-  local ok, err = os.remove(path)
+  local ok, loadedTable = pcall(loadTableFromSource, loadableSource, inputPath)
   if not ok then
-    logWarn("Failed to remove file: " .. path .. " (" .. tostring(err) .. ")")
+    return {
+      status = "failed",
+      file = filename,
+      inputPath = inputPath,
+      step = "load",
+      error = loadedTable,
+    }
   end
-  return ok
+
+  local archiveOk, archivedPath = pcall(archiveFile, inputPath, config.archivedInputDir)
+  if not archiveOk then
+    return {
+      status = "failed",
+      file = filename,
+      inputPath = inputPath,
+      step = "archive",
+      error = archivedPath,
+    }
+  end
+
+  local outputPath = outputPathFor(filename)
+  local writeOk, writeErr = pcall(writeFile, outputPath, Sorter.serialiseTable(loadedTable))
+  if not writeOk then
+    return {
+      status = "failed",
+      file = filename,
+      inputPath = inputPath,
+      archivePath = archivedPath,
+      step = "write",
+      error = writeErr,
+    }
+  end
+
+  removeFile(inputPath)
+
+  return {
+    status = "processed",
+    file = filename,
+    inputPath = inputPath,
+    archivePath = archivedPath,
+    outputPath = outputPath,
+  }
 end
 
--- === Main File Processing Function ===
+local function collectInputFiles()
+  local files = {}
 
-local function processFile(file)
-  local inputPath = inputDir .. "/" .. file
-  local tempPath = inputDir .. "/__working__.lua"       -- Temporary working copy path inside input folder
-
-  copyFile(inputPath, tempPath)
-      -- Try fixing the table file on the temporary copy
-  local fixSuccess, fixResult = pcall(fixTableFile, tempPath, targetTableName)
-  if not fixSuccess then
-    logError(file, "Fix failed: " .. fixResult)  -- fixTableFile threw an error, record failure, remove temp copy, do NOT archive original
-    removeFile(tempPath)
-    return false, "fix failed"
-  elseif not fixResult then -- fixTableFile returned false => target table not found, skip processing
-    removeFile(tempPath)  -- Clean up temp file
-        -- Do NOT archive the original, leave it in input folder
-    return nil, "table not found"
-  end
-
-  -- fixTableFile succeeded; load the fixed table from the temporary file first
-
-  local loadSuccess, loadedTable = pcall(loadTableFromFile, tempPath)
-  if not loadSuccess then -- Loading failed, record failure, remove temp file; do not archive
-    logError(file, "Load failed: " .. loadedTable)
-    removeFile(tempPath)
-    return false, "load failed"
-  end
-
-  -- Now archive the original input file
-  local archiveOk, archiveErr, archivedPath = archiveFile(inputPath, archivedInputDir)
-  if not archiveOk then -- Archiving failed, treat as failure and keep original input untouched
-    logError(file, "Archive failed: " .. archiveErr)
-    removeFile(tempPath)
-    return false, "archive failed"
-  end
-  logInfo("Archived original as:", archivedPath)
-
-  -- Write the sorted table to output .txt file
-  local baseOutputName = file:gsub("%.lua$", ".txt")
-  local resolvedOutputName = resolveFilenameCollision(sortedOutputDir, baseOutputName)
-  local outputTxtPath = sortedOutputDir .. "/" .. resolvedOutputName
-
-  local writeOk, writeErr = pcall(writeSortedTableToTxt, loadedTable, outputTxtPath)
-  if not writeOk then -- Keep archived original and input untouched here
-    logError(file, "Write failed: " .. writeErr)
-    removeFile(tempPath)
-    return false, "write failed"
-  end
-
-  -- Since all succeeded, remove original input file to keep folder clean
-  logInfo("Sorted table written to:", outputTxtPath)
-
-  removeFile(inputPath)  -- Clean original input file on success
-  removeFile(tempPath)   -- Clean temp working file
-
-  return true
-end
-
--- === Main Loop ===
-
-local function processLuaFiles()
-  -- Ensure required directories exist or create them
-  ensureDirectory(inputDir)
-  ensureDirectory(archivedInputDir)
-  ensureDirectory(sortedOutputDir)
-
-  -- Tables to track files that failed or were skipped
-  local failedFiles = {}
-  local skippedFiles = {}
-
-  -- Iterate through all files in the input directory
-  for file in lfs.dir(inputDir) do
-    -- if file:match("%.lua$") and file ~= "__working__.lua" and file ~= scriptFileName and file ~= actualScriptName then
-    if isLuaFile(file) and not isExcludedFile[file] then
-      logInfo("Processing:", file)
-      local status, reason = processFile(file)
-      if status == true then
-        -- Success, nothing to do here
-      elseif status == false then
-        table.insert(failedFiles, {file = file, reason = reason})
-      elseif status == nil then
-        -- skipped (target table not found)
-        table.insert(skippedFiles, file)
-      end
+  for filename in lfs.dir(config.inputDir) do
+    if isLuaFile(filename) and filename ~= config.scriptFileName then
+      table.insert(files, filename)
     end
   end
 
-  -- Print summary of skipped and failed files
+  table.sort(files)
+  return files
+end
+
+local function printSummary(results)
+  local skipped = {}
+  local failed = {}
+
+  for _, result in ipairs(results) do
+    if result.status == "skipped" then
+      table.insert(skipped, result)
+    elseif result.status == "failed" then
+      table.insert(failed, result)
+    end
+  end
+
   logInfo("\n=== Processing Summary ===")
-  if #skippedFiles > 0 then
-    logInfo("Skipped files (table '" .. targetTableName .. "' not found):")
-    for _, f in ipairs(skippedFiles) do
-      print(" - " .. f)
+
+  if #skipped > 0 then
+    logInfo("Skipped files (table '" .. config.targetTableName .. "' not found):")
+    for _, result in ipairs(skipped) do
+      print(" - " .. result.file)
     end
   else
     logInfo("No files skipped.")
   end
 
-  if #failedFiles > 0 then
+  if #failed > 0 then
     logInfo("\nFailed files:")
-    for _, f in ipairs(failedFiles) do
-      print(string.format(" - %s: %s", f.file, f.reason))
+    for _, result in ipairs(failed) do
+      print((" - %s: %s failed (%s)"):format(result.file, result.step, tostring(result.error)))
     end
   else
     logInfo("No files failed.")
@@ -370,4 +399,39 @@ local function processLuaFiles()
   logInfo("\nAll done.")
 end
 
-processLuaFiles()
+local function main()
+  ensureDirectory(config.inputDir)
+  ensureDirectory(config.archivedInputDir)
+  ensureDirectory(config.sortedOutputDir)
+
+  local results = {}
+
+  for _, filename in ipairs(collectInputFiles()) do
+    logInfo("Processing:", filename)
+
+    local result = processFile(filename)
+    table.insert(results, result)
+
+    if result.status == "processed" then
+      logInfo("Archived original as:", result.archivePath)
+      logInfo("Sorted table written to:", result.outputPath)
+    elseif result.status == "failed" then
+      logError(filename, result.step .. " failed: " .. tostring(result.error))
+    end
+  end
+
+  printSummary(results)
+end
+
+Sorter.prepareSavedVariableSource = prepareSavedVariableSource
+Sorter.loadTableFromSource = loadTableFromSource
+Sorter.sortedKeys = sortedKeys
+Sorter.formatKey = formatKey
+Sorter.processFile = processFile
+Sorter.main = main
+
+if arg and filenameFromPath(arg[0] or "") == config.scriptFileName then
+  main()
+else
+  return Sorter
+end

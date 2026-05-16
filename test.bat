@@ -1,4 +1,4 @@
 @echo off
 cd /d "%~dp0"
-lua TableFixAndSort.lua
+lua Tests/run.lua
 pause

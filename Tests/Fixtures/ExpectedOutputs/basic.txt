@@ -1,0 +1,12 @@
+{
+    alpha = 1,
+    zeta = 2,
+    sources = {
+        dungeon = true,
+        raid = true,
+    },
+    dungeon = {
+        [2] = "two",
+        [10] = "ten",
+    },
+}
