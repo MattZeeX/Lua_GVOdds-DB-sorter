@@ -1,2 +1,6 @@
 {
+    "Lua.workspace.ignoreDir": [
+        ".vscode",
+        "Archive/Older Archive"
+    ]
 }
